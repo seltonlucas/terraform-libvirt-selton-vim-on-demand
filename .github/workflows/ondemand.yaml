@@ -1,16 +1,52 @@
-
+name: ODIM VIM provisioning
+run-name: ODIM-VIM-${{ inputs.experiment_id || github.event.client_payload.experiment_id || github.run_id }}
 on:
   workflow_dispatch:
     inputs:
       terraform_variables:
+        required: true
+        type: string
+      target_cluster_ip:
         required: false
         type: string
+      cluster_name:
+        required: false
+        type: string
+      config_base64:
+        required: false
+        type: string
+      dispatch_free5gc:
+        required: false
+        type: boolean
+        default: false
+      free5gc_ref:
+        required: false
+        type: string
+        default: metrics
+      experiment_id:
+        required: false
+        type: string
+      minimum_ready_nodes:
+        required: false
+        type: number
+        default: 1
+      readiness_timeout_s:
+        required: false
+        type: number
+        default: 900
+      cluster_user:
+        required: false
+        type: string
+        default: packer
   repository_dispatch:
     types: [ondemand]
+permissions:
+  contents: read
 
 jobs:
   ondemand-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     
     steps:
       # ============================================
@@ -29,6 +65,9 @@ jobs:
         id: checkout
         uses: actions/checkout@v4
       
+      - name: Validate and normalize event
+        run: python3 -m scripts.odim_ci --context "$RUNNER_TEMP/odim-context.json" context p1
+
       - name: 📊 Checkpoint - Checkout
         run: |
           echo "checkout_end=$(date +%s)" >> $GITHUB_ENV
@@ -53,7 +92,8 @@ jobs:
       - name: ⏱️ Install genisoimage
         run: |
           START=$(date +%s)
-          sudo apt install -y genisoimage
+          sudo apt-get update
+          sudo apt-get install -y genisoimage sshpass
           END=$(date +%s)
           echo "⏱️  genisoimage install: $((END - START))s"
       
@@ -80,6 +120,11 @@ jobs:
             StrictHostKeyChecking no
             ProxyJump proxy
           END
+          if [ -n "$CLUSTER_SSH_KEY" ]; then
+            printf "%s\n" "$CLUSTER_SSH_KEY" > ~/.ssh/cluster.key
+            chmod 600 ~/.ssh/cluster.key
+            echo "ODIM_SSH_IDENTITY=$HOME/.ssh/cluster.key" >> "$GITHUB_ENV"
+          fi
           END=$(date +%s)
           echo "⏱️  SSH config: $((END - START))s"
         env:
@@ -92,10 +137,25 @@ jobs:
           QEMU_KEY: ${{ secrets.KEY }}
           QEMU_PORT: ${{ secrets.HOST }}
           GIT_KEY: ${{ secrets.GIT_KEY }}
+          CLUSTER_SSH_KEY: ${{ secrets.CLUSTER_SSH_KEY }}
       
       # ============================================
       # TERRAFORM WORKFLOW (Core da medição)
       # ============================================
+      - name: Check handoff credentials before provisioning
+        env:
+          CLUSTER_PASSWORD: ${{ secrets.CLUSTER_PASSWORD }}
+          ODIM_DISPATCH_TOKEN: ${{ secrets.FREE5GC_DISPATCH_TOKEN }}
+        run: |
+          if [[ -z "${ODIM_SSH_IDENTITY:-}" && -z "$CLUSTER_PASSWORD" ]]; then
+            echo "Cluster authentication is required before provisioning"
+            exit 1
+          fi
+          if [[ "$ODIM_DISPATCH_FREE5GC" == "true" && -z "$ODIM_DISPATCH_TOKEN" ]]; then
+            echo "A dedicated FREE5GC_DISPATCH_TOKEN is required for automatic dispatch"
+            exit 1
+          fi
+
       - name: ⏱️ Terraform Init
         id: init
         run: |
@@ -114,7 +174,7 @@ jobs:
         id: plan
         run: |
           START=$(date +%s)
-          terraform plan -var='${{ inputs.terraform_variables }}' -no-color -input=false -out=tfplan
+          python3 -m scripts.odim_ci --context "$RUNNER_TEMP/odim-context.json" plan
           END=$(date +%s)
           echo "plan_duration=$((END - START))" >> $GITHUB_OUTPUT
           echo "⏱️  Terraform Plan: $((END - START))s"
@@ -151,6 +211,36 @@ jobs:
       # ============================================
       # RESUMO FINAL
       # ============================================
+      - name: Wait for target Kubernetes readiness
+        id: cluster-ready
+        env:
+          SSHPASS: ${{ secrets.CLUSTER_PASSWORD }}
+        run: >-
+          python3 -m scripts.odim_ci --context "$RUNNER_TEMP/odim-context.json"
+          gate --terraform-output k8s.json --report metrics/vim-readiness.json
+
+      - name: Record disabled Free5GC handoff
+        if: success() && env.ODIM_DISPATCH_FREE5GC != 'true'
+        run: >-
+          python3 -m scripts.odim_ci --context "$RUNNER_TEMP/odim-context.json"
+          dispatch --readiness-report metrics/vim-readiness.json --report metrics/dispatch.json
+
+      - name: Dispatch Free5GC after readiness
+        if: success() && steps.cluster-ready.outputs.ready == 'true' && env.ODIM_DISPATCH_FREE5GC == 'true'
+        env:
+          ODIM_DISPATCH_TOKEN: ${{ secrets.FREE5GC_DISPATCH_TOKEN }}
+        run: >-
+          python3 -m scripts.odim_ci --context "$RUNNER_TEMP/odim-context.json"
+          dispatch --readiness-report metrics/vim-readiness.json --report metrics/dispatch.json
+
+      - name: Upload readiness and handoff evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: readiness-${{ github.run_id }}-${{ github.run_attempt }}
+          path: metrics/*.json
+          if-no-files-found: warn
+
       - name: 📊 Performance Summary
         if: always()
         run: |

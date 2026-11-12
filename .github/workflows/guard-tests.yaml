@@ -1,0 +1,18 @@
+name: ODIM guard offline tests
+on:
+  push:
+    branches: [ci/readiness-gated-dispatch]
+    paths: ["scripts/**", "tests/**", ".github/workflows/guard-tests.yaml"]
+  pull_request:
+    branches: [metrics]
+    paths: ["scripts/**", "tests/**", ".github/workflows/**"]
+permissions:
+  contents: read
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline unit and fake-transport integration tests
+        run: python3 -m unittest discover -s tests -v
