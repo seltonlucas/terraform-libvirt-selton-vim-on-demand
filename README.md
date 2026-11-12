@@ -1,37 +1,50 @@
-# terraform-libvirt-Selton-Lucas_IaC
+# ODIM on-demand VIM provisioning
+
+This repository contains the Terraform side of the ODIM IaC-to-MANO workflow. It provisions the VIM and checks Kubernetes readiness before an explicitly enabled Free5GC handoff. A host with libvirt/KVM must exist before P1 starts; an already running Kubernetes cluster is not a host prerequisite.
+
+- Read [the readiness and handoff guide](docs/readiness-setup.md) before enabling dispatch.
+- Use [the host/image preparation guide](docs/host-preparation.md) for the read-only prerequisite checker and benchmark boundaries.
+- The image factory is maintained separately in seltonlucas/packer_free5gc. Its qcow2 output is not automatically selected by this repository: each config entry must explicitly identify the intended image.
+- The current config defaults refer to Ubuntu Jammy cloud images, while the inspected Packer template builds an Ubuntu Focal image. Treat that as an image-selection boundary, not evidence that previous runs used either default.
+- No deployment or image build is performed by the offline test workflow. The manuscript is maintained separately and is not changed by these operational documents.
+
+## Current Terraform contract
+
+The source files, not older generated documentation, define the interface.
+
 <!-- BEGIN_TF_DOCS -->
-## Requirements
+### Requirements and providers
 
-| Name | Version |
-|------|---------|
-| <a name="requirement_terraform"></a> [terraform](#requirement\_terraform) | >= 1.9.0 |
+| Component | Declared constraint |
+|---|---|
+| Terraform | >= 1.9.0 |
+| dmacvicar/libvirt | 0.8.3 |
 
-## Providers
+### Modules
 
-No providers.
+| Name | Source | Revision |
+|---|---|---|
+| kubernetes | git::ssh://git@github.com/descomplicando-terraform/terraform-libvirt-selton-kubernetes.git | 0.0.2 |
 
-## Modules
+### Inputs
 
-| Name | Source | Version |
-|------|--------|---------|
-| <a name="module_kubernetes"></a> [kubernetes](#module\_kubernetes) | git::ssh://git@github.com/descomplicando-terraform/terraform-libvirt-selton-kubernetes.git | 0.0.1 |
+| Name | Type | Default |
+|---|---|---|
+| config | map(any) | See variables.tf: edge and cp example configurations |
 
-## Resources
+Each config entry supplies img, libvirt_disk_path, memory, vcpus, nodes and pool. The example defaults are not a verified laboratory inventory. Workflow event handling requires explicit provisioning inputs rather than silently applying them.
 
-No resources.
+### Outputs
 
-## Inputs
-
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| <a name="input_img"></a> [img](#input\_img) | Path to the image that will be used | `string` | `"https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"` | no |
-| <a name="input_libvirt_disk_path"></a> [libvirt\_disk\_path](#input\_libvirt\_disk\_path) | Path to libvirt the pool | `string` | `"var/lib/libvirt/pool/kubernetes"` | no |
-| <a name="input_memory"></a> [memory](#input\_memory) | ram | `number` | `4096` | no |
-| <a name="input_nodes"></a> [nodes](#input\_nodes) | List with the names of each node that will be created | `list(any)` | <pre>[<br/>  "edge01",<br/>  "edge02"<br/>]</pre> | no |
-| <a name="input_pool"></a> [pool](#input\_pool) | Name of the pool that will be created | `string` | `"kubernetes"` | no |
-| <a name="input_vcpus"></a> [vcpus](#input\_vcpus) | vcpu | `number` | `2` | no |
-
-## Outputs
-
-No outputs.
+| Name | Value |
+|---|---|
+| k8s | module.kubernetes |
 <!-- END_TF_DOCS -->
+
+## Local tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Tests use synthetic fixtures and do not contact the laboratory. Existing provider SSH trust and state-recovery settings require operator review before real runs.

@@ -1,61 +1,61 @@
-# Gate de prontidão e dispatch ODIM
+# ODIM readiness gate and workflow dispatch
 
-Esta alteração é de código e operação. Não altera o manuscrito nem demonstra ganhos de desempenho novos. Os testes usam fixtures sintéticas, executáveis falsos e HTTP simulado; não fazem deploy no laboratório.
+This change concerns code and operation. It does not modify the manuscript or demonstrate new performance gains. Tests use synthetic fixtures, fake executables and simulated HTTP responses; they do not deploy anything in the laboratory.
 
-## Critério de prontidão
+## Readiness criteria
 
-O provisionamento Terraform e a obtenção de um IP não significam que o VIM já pode receber o Free5GC. Antes do handoff, a Pipeline 1 verifica no endpoint selecionado:
+Successful Terraform provisioning and an assigned IP do not mean the VIM can already receive Free5GC. Before handoff, Pipeline 1 checks the selected endpoint for:
 
-1. Acesso SSH através do proxy já configurado.
-2. API Kubernetes `/readyz` acessível e respondendo corretamente.
-3. Quantidade mínima configurada de nós, todos os nós registrados em `Ready=True` e pelo menos um nó pronto não marcado como unschedulable.
-4. Três observações consecutivas de prontidão. A consulta padrão ocorre a cada 5 segundos; qualquer observação ruim reinicia a contagem.
+1. SSH access through the configured proxy.
+2. A reachable Kubernetes `/readyz` API with the expected successful response.
+3. The configured minimum number of nodes, all registered nodes reporting `Ready=True`, and at least one Ready node not marked unschedulable.
+4. Three consecutive successful observations. The default polling interval is 5 seconds; an unsuccessful observation resets the consecutive count.
 
-O prazo padrão é 900 segundos, contado com relógio monotônico. Uma consulta SSH tem prazo limitado; seus processos locais são encerrados em caso de timeout. Timeout produz código 124 e não libera dispatch. Configuração inválida também falha de forma fechada.
+The default deadline is 900 seconds, measured with a monotonic clock. SSH queries are bounded, and their local process groups are terminated on timeout. Timeout returns exit code 124 and does not authorize dispatch. Invalid configuration also fails closed.
 
-A Pipeline 2 repete o gate antes de criar recursos no OSM. Isso reduz a janela entre a primeira observação e o deploy, mas não garante disponibilidade permanente após a observação. A prontidão do cluster não é prova de registro de UEs, sessão PDU ou tráfego 5G.
+Pipeline 2 repeats the gate before creating OSM resources. This reduces the gap between the first observation and deployment, but it cannot guarantee permanent availability afterward. Cluster readiness is not proof of UE registration, a PDU session or working 5G traffic.
 
-## Ativação segura
+## Safe activation
 
-- O novo código está em uma branch de revisão. Nenhuma infraestrutura foi alterada para validá-lo.
-- `dispatch_free5gc` tem default `false`, para não duplicar o dispatcher externo existente.
-- Primeiro disponibilize a versão de P2 que contém os novos inputs e o novo gate. Depois configure P1 com `free5gc_ref` apontando para essa versão.
-- Somente após revisar a configuração e desativar o disparo duplicado no controlador externo, habilite `dispatch_free5gc=true`.
-- Uma mudança no fork Terraform não atualiza automaticamente o repositório original da organização onde foram localizados os históricos anteriores. A escolha do repositório de execução precisa ser explícita.
+- The code is provided on a review branch. No infrastructure was changed to validate it.
+- `dispatch_free5gc` defaults to `false` to avoid duplicating an existing external dispatcher.
+- First make the P2 version containing the new inputs and gate available. Then point P1 `free5gc_ref` to that version.
+- Enable `dispatch_free5gc=true` only after reviewing the configuration and disabling duplicate dispatch in the external controller.
+- Changing the Terraform fork does not automatically update the original organization repository where historical runs were found. Select the execution repository explicitly.
 
-## Segredos de CI
+## CI secrets
 
-Os segredos de proxy, host QEMU e OSM existentes continuam sendo necessários. Adicionalmente:
+The existing proxy, QEMU-host and OSM secrets remain necessary. Additional configuration is:
 
-| Uso | Configuração |
+| Purpose | Configuration |
 |---|---|
-| Gate SSH em P1 e P2 | `CLUSTER_PASSWORD` ou `CLUSTER_SSH_KEY` em cada repositório que executa a respectiva pipeline |
-| Usuário da imagem | `cluster_user`, default `packer`; sudo das consultas precisa funcionar sem prompt |
-| Dispatch automático P1 para P2 | `FREE5GC_DISPATCH_TOKEN`, autorizado a criar workflow_dispatch no repositório alvo |
+| P1 and P2 SSH gate | `CLUSTER_PASSWORD` or `CLUSTER_SSH_KEY` in each repository running the corresponding pipeline |
+| Image login user | `cluster_user`, default `packer`; probe commands require non-interactive sudo |
+| Automatic P1-to-P2 dispatch | `FREE5GC_DISPATCH_TOKEN`, authorized to create workflow_dispatch in the target repository |
 
-Prefira um token dedicado ou uma instalação GitHub App com o menor acesso necessário. Para token fine-grained, a criação do dispatch requer permissão Actions de escrita no alvo. O token pessoal utilizado pelo agente para commits não foi copiado para secrets de CI. O GITHUB_TOKEN do repositório de origem não deve ser presumido autorizado a outro repositório.
+Prefer a dedicated token or GitHub App installation with the minimum necessary access. Fine-grained dispatch authorization requires Actions write permission in the target repository. The personal token used by the agent for commits was not copied into CI secrets. Do not assume the source repository GITHUB_TOKEN is authorized to another repository.
 
-A chave opcional é escrita apenas no runner e com permissão restrita. O gate passa a senha via SSHPASS, não como argumento de processo. O kubeconfig é obtido em JSON, mantido com modo 0600 e não é publicado nos artifacts de métricas.
+The optional key is written only on the runner with restricted permissions. The gate passes the password through SSHPASS, not a process argument. The kubeconfig is retrieved as JSON, kept at mode 0600 and excluded from metrics artifacts.
 
-### Confiança TLS do novo monitor
+### TLS trust for the new monitor
 
-O monitor NS valida o certificado HTTPS por padrão, usando a CA confiável do host remoto osm. Para uma CA privada, configure a variável de repositório `OSM_CA_FILE` com caminho absoluto para um arquivo de CA já existente naquele host. É um caminho, não o conteúdo do certificado. Caminhos relativos e caracteres de controle são rejeitados; não há fallback insecure. Nenhuma CA foi instalada no laboratório por esta alteração.
+The NS monitor validates the HTTPS certificate using the remote osm host trust store. For a private CA, set repository variable `OSM_CA_FILE` to an absolute path to a CA file already present on that host. This is a path, not certificate contents. Relative paths and control characters are rejected, with no insecure fallback. This change did not install a CA in the laboratory.
 
-Os POSTs legados ainda usam `curl -k`: a segurança TLS de toda a pipeline não foi resolvida neste escopo. Revisar esse legado antes de uso fora de um ambiente controlado. O novo monitor não transmite credencial para um servidor cujo certificado não possa validar.
+Legacy POST requests still use `curl -k`: this change does not resolve TLS security for the entire pipeline. Review those requests before use outside a controlled environment. The new curl monitor validates the HTTPS endpoint before sending its credential; the SSH transport also relies on the configured host-key trust policy.
 
-P2 tem limite de job de 65 minutos para comportar os limites individuais de espera, o sleep legado e margem de setup/finalização. Os testes verificam esse orçamento; isso não é uma medição de duração do laboratório.
+P2 has a 65-minute job limit to accommodate individual wait deadlines, the legacy sleep and setup/finalization margin. Tests check this budget; it is not a measured laboratory duration.
 
-Relatórios de erro mantêm o experimento, produtor, tentativa e upstream do contexto atual, sem reaproveitar documento de outro run. Se o POST de dispatch retornar um ID mas a confirmação falhar, o estado permanece unknown e preserva esse ID e a ref para reconciliação. O caminho disabled registra a opção sem disponibilizar token ao step.
+Failure reports preserve the experiment, producer run, attempt and upstream identifiers from the current context without reusing another run report. If dispatch POST returns an ID but confirmation fails, the outcome remains unknown and retains the ID and ref for reconciliation. The disabled path records the choice without giving that step a token.
 
-Entradas e alvos com scope IPv6 são rejeitados, não reparados. Metadados do resumo são lidos por expansão de variáveis de ambiente Bash; campos env dos steps continuam usando o mapeamento Actions adequado.
+Inputs and targets containing IPv6 scopes are rejected, not repaired. Shell summaries read metadata through Bash environment expansion; YAML env fields retain the appropriate Actions mapping.
 
-## Contrato de eventos
+## Event contract
 
-Ambos os workflows aceitam workflow_dispatch e repository_dispatch do tipo `ondemand`. Para repository_dispatch, use campos estruturados em client_payload; strings de comandos em `args` não são interpretadas como shell.
+Both workflows accept workflow_dispatch and repository_dispatch with event type `ondemand`. For repository_dispatch, use structured client_payload fields; command strings in `args` are not interpreted as shell code.
 
-Em P1, preserve seu argumento HCL atual em `terraform_variables` ou forneça o objeto `config` do provisionamento em client_payload. Não envie os dois. O HCL é passado como um único argumento para Terraform, sem shell; o objeto é escrito como var-file JSON privado. Não há provisionamento com inputs vazios por default.
+In P1, preserve the existing HCL argument in `terraform_variables`, or provide the provisioning `config` object in client_payload. Do not provide both. HCL is passed as one Terraform argument without a shell; the object is written to a private JSON var-file. Empty inputs do not silently authorize default provisioning.
 
-Campos de controle para acrescentar ao seu payload existente:
+Add these control fields to the existing payload:
 
 ```json
 {
@@ -70,55 +70,55 @@ Campos de controle para acrescentar ao seu payload existente:
 }
 ```
 
-O endereço acima é de documentação, não do laboratório. Este fragmento não substitui seu config Terraform nem o config_base64 do Free5GC. Quando o dispatch automático for habilitado, cluster_name e config_base64 são obrigatórios. Se houver mais de um endpoint nos outputs Terraform, target_cluster_ip precisa selecionar exatamente um deles; nenhum primeiro IP é escolhido silenciosamente.
+This address is for documentation, not the laboratory. The fragment does not replace the Terraform config or Free5GC config_base64. When automatic dispatch is enabled, cluster_name and config_base64 are required. If Terraform outputs multiple endpoints, target_cluster_ip must select exactly one; the first IP is never chosen silently.
 
-O remetente automático chama o workflow deploy.yaml com ref explícita e transporta experiment_id, upstream_run_id e upstream_run_attempt. P2 mantém a referência à tentativa de P1 nos seus relatórios.
+The automatic sender targets deploy.yaml with an explicit ref and carries experiment_id, upstream_run_id and upstream_run_attempt. P2 preserves the reference to the P1 attempt in its reports.
 
-## Evidência e resultado do dispatch
+## Evidence and dispatch outcomes
 
-A evidência usada no handoff precisa pertencer ao mesmo experimento, run e tentativa, ter três observações válidas e ser recente. O remetente valida o alvo antes do POST. A API é versionada em `2026-03-10`; a resposta com ID de execução é seguida de leitura desse run para confirmar branch, evento e identidade do experimento.
+Handoff evidence must belong to the same experiment, run and attempt, contain three valid observations and be recent. The sender validates the target before POST. The API is pinned to `2026-03-10`; the response containing the run ID is followed by a read-back of that run to verify branch, event and experiment identity.
 
-Não há retentativa cega de POST. Se a resposta for perdida ou a leitura posterior não confirmar a criação, o resultado fica desconhecido e deve ser reconciliado antes de reenviar. Isso não implementa exactly-once nem idempotência de todo o ciclo OSM/Terraform.
+There is no blind POST retry. If a response is lost or read-back cannot confirm creation, reconcile the unknown outcome before resending. This does not implement exactly-once delivery or lifecycle-wide OSM/Terraform idempotency.
 
-| Estado | Interpretação |
+| State | Interpretation |
 |---|---|
-| readiness checking sem conclusão | Execução incompleta; não tratar como pronta |
-| readiness ready | Cluster passou pelo gate observado |
-| readiness timeout/failed | Handoff não liberado |
-| dispatch disabled | Não houve tentativa de disparo pelo novo remetente |
-| dispatch accepted | Run de P2 criado e lido de volta; não significa Free5GC funcional |
-| dispatch blocked/rejected | Não houve confirmação de um dispatch autorizado |
-| dispatch unknown | Reconciliar o run remoto; não reenviar automaticamente |
+| readiness checking without completion | Incomplete execution; do not treat it as ready |
+| readiness ready | The cluster passed the observed gate |
+| readiness timeout/failed | Handoff was not authorized |
+| dispatch disabled | The new sender did not attempt dispatch |
+| dispatch accepted | The P2 run was created and read back; this does not mean Free5GC is functional |
+| dispatch blocked/rejected | No authorized dispatch was confirmed |
+| dispatch unknown | Reconcile the remote run; do not resend automatically |
 
-Artifacts `readiness-<run_id>-<run_attempt>` incluem JSON de prontidão e handoff. Não incluem contexto privado, config_base64, kubeconfig ou token. Os relatórios identificam o IP alvo e contagens de nós; sanitize identificadores antes de publicação científica. A retenção depende da política do repositório; exporte os dados necessários antes de expirar.
+Artifacts `readiness-<run_id>-<run_attempt>` contain readiness and handoff JSON. They exclude private context, config_base64, kubeconfig and tokens. Reports identify the target IP and node counts; sanitize identifiers before scientific publication. Retention depends on repository policy, so export required evidence before it expires.
 
-## Monitor de estado OSM
+## OSM state monitor
 
-O monitor usa GET JSON em `/osm/nslcm/v1/ns_instances_content/{id}`, o endpoint de leitura utilizado pelo cliente oficial v16. Não tenta extrair palavras da saída YAML de `osm ns-show --literal`. A leitura valida o ID exato, campos do nível superior e ausência de chaves JSON duplicadas.
+The monitor uses GET JSON from `/osm/nslcm/v1/ns_instances_content/{id}`, the read endpoint used by the official v16 client. It does not tokenize the YAML output of `osm ns-show --literal`. It validates the exact ID, top-level fields and absence of duplicate JSON keys.
 
-Somente `nsState=READY`, `currentOperation=IDLE`, `operational-status=running` e `config-status=configured` juntos são aceitos. Falha de configuração, BROKEN, DEGRADED e terminação não são sucesso, mesmo que outro campo ainda indique running. Estados de progresso reconhecidos mantêm a espera; formatos não suportados falham de forma fechada. A compatibilidade com a versão realmente instalada precisa de validação com registro sanitizado do laboratório.
+Only `nsState=READY`, `currentOperation=IDLE`, `operational-status=running` and `config-status=configured` together are accepted. Configuration failure, BROKEN, DEGRADED and termination are not success even if another field still says running. Recognized progress states keep polling; unsupported formats fail closed. Compatibility with the installed version still requires validation against a sanitized laboratory record.
 
-A consulta é somente leitura, limitada por prazo e transporta o bearer por stdin do SSH/curl, não por argumento de processo. O relatório `metrics/ns-readiness.json` preserva a correlação com P1 e não publica a resposta NS completa. Timeout retorna 124; outros erros retornam código não zero. A criação de um ID NS é distinguida da conclusão OSM, que continua não sendo prova de tráfego UE→DN.
+Queries are read-only and bounded. They carry bearer headers through SSH/curl stdin rather than process arguments. `metrics/ns-readiness.json` preserves P1 correlation without publishing the full NS response. Timeout returns 124; other errors also return nonzero. NS ID creation is distinguished from OSM lifecycle completion, which is still not proof of UE-to-DN traffic.
 
-Defina minimum_ready_nodes conforme a topologia esperada: o default 1 não exige que futuros nós ainda não registrados já tenham ingressado. O gate não mede capacidade para o workload nem prova funcionamento do CoreDNS. Os POSTs e os nomes temporários remotos legados do deploy continuam precisando de uma revisão própria de concorrência/idempotência antes de ensaios paralelos.
+Set minimum_ready_nodes to match the expected topology: default 1 does not require future, unregistered nodes to have joined. The gate does not measure workload capacity or prove CoreDNS functionality. Legacy POSTs and shared remote temporary payload names still require a separate concurrency/idempotency review before parallel trials.
 
-Contrato de referência, consultado no código oficial v16.0.0:
+Reference contract inspected in official v16.0.0 source:
 - https://osm.etsi.org/gitweb/?p=osm/osmclient.git;a=blob_plain;f=osmclient/sol005/ns.py;hb=refs/tags/v16.0.0
 - https://osm.etsi.org/gitweb/?p=osm/LCM.git;a=blob_plain;f=osm_lcm/ns.py;hb=refs/tags/v16.0.0
 
-## Verificação local, apenas WSL/Docker
+## Local verification: WSL/Docker only
 
-Na raiz do checkout:
+From the checkout root:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-A workflow guard-tests executa somente os testes offline, sem Terraform apply/destroy, SSH real ou dispatch real. As consultas do laboratório e as operações OSM/Terraform só são executadas quando o workflow operacional for explicitamente disparado.
+The guard-tests workflow runs offline tests only: no Terraform apply/destroy, real SSH or real dispatch. Laboratory queries and OSM/Terraform operations run only when the operational workflow is explicitly triggered.
 
-O backend de state, a recuperação após falhas de apply e a idempotência dos POSTs OSM continuam exigindo revisão própria. Não alteramos automaticamente o state existente ou a política de recuperação do laboratório. O relatório de pods é inspeção, não uma prova de conectividade 5G.
+State-backend configuration, apply-failure recovery and OSM POST idempotency still require separate review. This change does not automatically replace existing state or the laboratory recovery policy. Pod listing is inspection, not a functional 5G connectivity test.
 
-## Referências de implementação
+## Implementation references
 
 - Kubernetes API health endpoints: https://kubernetes.io/docs/reference/using-api/health-checks/
 - GitHub workflow dispatch API: https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event
